@@ -12,7 +12,8 @@ enum ProcedureState
 {
    IDLE = 0,
    WAIT_LINE1,
-   WAIT_LINE2
+   WAIT_LINE2,
+   WAIT_CONFIRM
 };
 
 CTrade g_trade;
@@ -22,11 +23,14 @@ ProcedureState g_state = IDLE;
 string g_objPrefix = "GRID_TMP_";
 string g_line1Name = "";
 string g_line2Name = "";
+string g_confirmLineName = "";
 
 bool   g_line1Fixed = false;
 bool   g_line2Fixed = false;
 double g_line1Price = 0.0;
 double g_line2Price = 0.0;
+
+int    g_selectedOrderCount = 0;
 
 //--- Helpers de symbole
 int SymbolDigits()
@@ -94,14 +98,19 @@ void CleanupTemporaryObjects()
       ObjectDelete(0, g_line1Name);
    if(g_line2Name != "")
       ObjectDelete(0, g_line2Name);
+   if(g_confirmLineName != "")
+      ObjectDelete(0, g_confirmLineName);
 
    g_line1Name  = "";
    g_line2Name  = "";
+   g_confirmLineName = "";
    g_line1Fixed = false;
    g_line2Fixed = false;
    g_line1Price = 0.0;
    g_line2Price = 0.0;
+   g_selectedOrderCount = 0;
 
+   Comment("");
    ChartRedraw(0);
 }
 
@@ -146,6 +155,8 @@ void StartProcedure()
    CleanupTemporaryObjects();
    g_line1Name = MakeObjectName("TempLine1");
    g_line2Name = MakeObjectName("TempLine2");
+   g_confirmLineName = MakeObjectName("ConfirmLine");
+   g_selectedOrderCount = NumberOfOrders;
 
    g_state = WAIT_LINE1;
    Print("Procedure demarree: placez la ligne 1 avec clic gauche.");
@@ -206,7 +217,41 @@ void FixLine2(const int x, const int y)
       return;
 
    g_line2Fixed = true;
-   Print("Ligne 2 fixee a ", DoubleToString(g_line2Price, SymbolDigits()), ". Generation de la grille...");
+   g_state = WAIT_CONFIRM;
+
+   const double previewPrice = NormalizePriceToTick((g_line1Price + g_line2Price) * 0.5);
+   if(!CreateOrMoveHLine(g_confirmLineName, previewPrice, clrSilver))
+   {
+      CancelProcedure("Impossible de creer la ligne de confirmation.");
+      return;
+   }
+
+   Print("Ligne 2 fixee a ", DoubleToString(g_line2Price, SymbolDigits()),
+         ". Etape de confirmation: molette pour ajuster le nombre d'ordres, clic gauche pour valider.");
+   Comment("Confirmation grille\nOrdres: ", g_selectedOrderCount, "\nMolette: +/- ordres\nClic gauche: valider");
+   ChartRedraw(0);
+}
+
+void AdjustOrderCountWithWheel(const int wheelDelta)
+{
+   if(g_state != WAIT_CONFIRM)
+      return;
+
+   if(wheelDelta == 0)
+      return;
+
+   const int minOrders = 2;
+   const int maxOrders = 200;
+   const int step = (wheelDelta > 0) ? 1 : -1;
+
+   const int updated = (int)MathMax(minOrders, MathMin(maxOrders, g_selectedOrderCount + step));
+   if(updated == g_selectedOrderCount)
+      return;
+
+   g_selectedOrderCount = updated;
+   Print("Nombre d'ordres ajuste a ", g_selectedOrderCount, " (molette=", wheelDelta, ").");
+   Comment("Confirmation grille\nOrdres: ", g_selectedOrderCount, "\nMolette: +/- ordres\nClic gauche: valider");
+   ChartRedraw(0);
 }
 
 bool PreparePendingPrice(const double target,
@@ -284,7 +329,7 @@ bool PreparePendingPrice(const double target,
    return (preparedPrice > 0.0);
 }
 
-void BuildGridOrders()
+void BuildGridOrders(const int orderCount)
 {
    if(!g_line1Fixed || !g_line2Fixed)
    {
@@ -293,9 +338,9 @@ void BuildGridOrders()
       return;
    }
 
-   if(NumberOfOrders < 2)
+   if(orderCount < 2)
    {
-      Print("NumberOfOrders doit etre >= 2 (actuel=", NumberOfOrders, ").");
+      Print("Le nombre d'ordres doit etre >= 2 (actuel=", orderCount, ").");
       CancelProcedure("Configuration invalide");
       return;
    }
@@ -322,12 +367,12 @@ void BuildGridOrders()
       return;
    }
 
-   const double step = (high - low) / (NumberOfOrders - 1);
+   const double step = (high - low) / (orderCount - 1);
 
    int placed = 0;
    int failed = 0;
 
-   for(int i = 0; i < NumberOfOrders; ++i)
+   for(int i = 0; i < orderCount; ++i)
    {
       const double rawPrice = low + (step * i);
       ENUM_ORDER_TYPE orderType;
@@ -336,7 +381,7 @@ void BuildGridOrders()
       if(!PreparePendingPrice(rawPrice, orderType, finalPrice))
       {
          ++failed;
-         Print("[", i + 1, "/", NumberOfOrders, "] Niveau ignore (prix non preparable): ",
+         Print("[", i + 1, "/", orderCount, "] Niveau ignore (prix non preparable): ",
                DoubleToString(rawPrice, SymbolDigits()));
          continue;
       }
@@ -352,7 +397,7 @@ void BuildGridOrders()
       if(!sent)
       {
          ++failed;
-         Print("[", i + 1, "/", NumberOfOrders, "] Echec envoi ", EnumToString(orderType),
+         Print("[", i + 1, "/", orderCount, "] Echec envoi ", EnumToString(orderType),
                " @ ", DoubleToString(finalPrice, SymbolDigits()),
                " retcode=", g_trade.ResultRetcode(),
                " desc=", g_trade.ResultRetcodeDescription(),
@@ -361,13 +406,13 @@ void BuildGridOrders()
       else
       {
          ++placed;
-         Print("[", i + 1, "/", NumberOfOrders, "] OK ", EnumToString(orderType),
+         Print("[", i + 1, "/", orderCount, "] OK ", EnumToString(orderType),
                " @ ", DoubleToString(finalPrice, SymbolDigits()),
                " ticket=", g_trade.ResultOrder());
       }
    }
 
-   Print("Grille terminee. Placed=", placed, " Failed=", failed);
+   Print("Grille terminee. Ordres demandes=", orderCount, " Placed=", placed, " Failed=", failed);
 
    CleanupTemporaryObjects();
    g_state = IDLE;
@@ -414,6 +459,12 @@ void OnChartEvent(const int id,
       return;
    }
 
+   if(id == CHARTEVENT_MOUSE_WHEEL)
+   {
+      AdjustOrderCountWithWheel((int)dparam);
+      return;
+   }
+
    if(id == CHARTEVENT_CLICK)
    {
       if(g_state == WAIT_LINE1)
@@ -423,7 +474,11 @@ void OnChartEvent(const int id,
       else if(g_state == WAIT_LINE2)
       {
          FixLine2((int)lparam, (int)dparam);
-         BuildGridOrders();
+      }
+      else if(g_state == WAIT_CONFIRM)
+      {
+         Print("Validation utilisateur. Envoi de la grille...");
+         BuildGridOrders(g_selectedOrderCount);
       }
    }
 }
