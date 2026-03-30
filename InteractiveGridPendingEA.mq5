@@ -23,7 +23,7 @@ ProcedureState g_state = IDLE;
 string g_objPrefix = "GRID_TMP_";
 string g_line1Name = "";
 string g_line2Name = "";
-string g_confirmLineName = "";
+string g_confirmOrdersPrefix = "";
 
 bool   g_line1Fixed = false;
 bool   g_line2Fixed = false;
@@ -98,12 +98,17 @@ void CleanupTemporaryObjects()
       ObjectDelete(0, g_line1Name);
    if(g_line2Name != "")
       ObjectDelete(0, g_line2Name);
-   if(g_confirmLineName != "")
-      ObjectDelete(0, g_confirmLineName);
+   const int totalObjects = ObjectsTotal(0, -1, -1);
+   for(int i = totalObjects - 1; i >= 0; --i)
+   {
+      const string name = ObjectName(0, i, -1, -1);
+      if(g_confirmOrdersPrefix != "" && StringFind(name, g_confirmOrdersPrefix) == 0)
+         ObjectDelete(0, name);
+   }
 
    g_line1Name  = "";
    g_line2Name  = "";
-   g_confirmLineName = "";
+   g_confirmOrdersPrefix = "";
    g_line1Fixed = false;
    g_line2Fixed = false;
    g_line1Price = 0.0;
@@ -155,7 +160,7 @@ void StartProcedure()
    CleanupTemporaryObjects();
    g_line1Name = MakeObjectName("TempLine1");
    g_line2Name = MakeObjectName("TempLine2");
-   g_confirmLineName = MakeObjectName("ConfirmLine");
+   g_confirmOrdersPrefix = MakeObjectName("ConfirmOrder_");
    g_selectedOrderCount = NumberOfOrders;
 
    g_state = WAIT_LINE1;
@@ -203,6 +208,57 @@ void FixLine1(const int x, const int y)
    Print("Ligne 1 fixee a ", DoubleToString(g_line1Price, SymbolDigits()), ". Placez la ligne 2.");
 }
 
+void RenderOrderPreview()
+{
+   if(g_state != WAIT_CONFIRM || !g_line1Fixed || !g_line2Fixed)
+      return;
+
+   const int totalObjects = ObjectsTotal(0, -1, -1);
+   for(int i = totalObjects - 1; i >= 0; --i)
+   {
+      const string name = ObjectName(0, i, -1, -1);
+      if(g_confirmOrdersPrefix != "" && StringFind(name, g_confirmOrdersPrefix) == 0)
+         ObjectDelete(0, name);
+   }
+
+   if(g_selectedOrderCount < 2)
+      return;
+
+   const double high = MathMax(g_line1Price, g_line2Price);
+   const double low  = MathMin(g_line1Price, g_line2Price);
+   const double step = (high - low) / (g_selectedOrderCount - 1);
+
+   int validOrders = 0;
+
+   for(int i = 0; i < g_selectedOrderCount; ++i)
+   {
+      const double rawPrice = low + (step * i);
+      ENUM_ORDER_TYPE orderType;
+      double finalPrice = 0.0;
+      color previewColor = clrSilver;
+
+      if(PreparePendingPrice(rawPrice, orderType, finalPrice))
+      {
+         ++validOrders;
+         previewColor = (orderType == ORDER_TYPE_BUY_LIMIT) ? clrLime : clrRed;
+      }
+      else
+      {
+         finalPrice = NormalizePriceToTick(rawPrice);
+      }
+
+      const string previewName = g_confirmOrdersPrefix + IntegerToString(i + 1);
+      if(!CreateOrMoveHLine(previewName, finalPrice, previewColor))
+      {
+         Print("Impossible d'afficher la preview #", i + 1);
+      }
+   }
+
+   Comment("Confirmation grille\nOrdres: ", g_selectedOrderCount,
+           " (valides: ", validOrders, ")\nVert=BUY_LIMIT Rouge=SELL_LIMIT Gris=non placable\nMolette: +/- ordres\nClic gauche: valider");
+   ChartRedraw(0);
+}
+
 void FixLine2(const int x, const int y)
 {
    double price = 0.0;
@@ -219,17 +275,9 @@ void FixLine2(const int x, const int y)
    g_line2Fixed = true;
    g_state = WAIT_CONFIRM;
 
-   const double previewPrice = NormalizePriceToTick((g_line1Price + g_line2Price) * 0.5);
-   if(!CreateOrMoveHLine(g_confirmLineName, previewPrice, clrSilver))
-   {
-      CancelProcedure("Impossible de creer la ligne de confirmation.");
-      return;
-   }
-
    Print("Ligne 2 fixee a ", DoubleToString(g_line2Price, SymbolDigits()),
          ". Etape de confirmation: molette pour ajuster le nombre d'ordres, clic gauche pour valider.");
-   Comment("Confirmation grille\nOrdres: ", g_selectedOrderCount, "\nMolette: +/- ordres\nClic gauche: valider");
-   ChartRedraw(0);
+   RenderOrderPreview();
 }
 
 void AdjustOrderCountWithWheel(const int wheelDelta)
@@ -250,8 +298,7 @@ void AdjustOrderCountWithWheel(const int wheelDelta)
 
    g_selectedOrderCount = updated;
    Print("Nombre d'ordres ajuste a ", g_selectedOrderCount, " (molette=", wheelDelta, ").");
-   Comment("Confirmation grille\nOrdres: ", g_selectedOrderCount, "\nMolette: +/- ordres\nClic gauche: valider");
-   ChartRedraw(0);
+   RenderOrderPreview();
 }
 
 bool PreparePendingPrice(const double target,
